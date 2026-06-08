@@ -13,6 +13,17 @@ SELECT id, original_url, short_name, created_at, updated_at
 FROM links
 ORDER BY id;
 
+-- name: ListLinksPage :many
+SELECT id, original_url, short_name, created_at, updated_at
+FROM links
+ORDER BY id
+LIMIT sqlc.arg(page_limit)::int
+OFFSET sqlc.arg(page_offset)::int;
+
+-- name: CountLinks :one
+SELECT COUNT(*)
+FROM links;
+
 -- name: UpdateLink :one
 UPDATE links
 SET original_url = $2,

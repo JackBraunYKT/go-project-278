@@ -26,6 +26,8 @@ import (
 const (
 	defaultBaseURL       = "https://short.io"
 	generatedNameBytes   = 6
+	linksRangeUnit       = "links"
+	maxLinksRangeLimit   = int64(1<<31 - 1)
 	maxShortNameAttempts = 5
 )
 
@@ -39,6 +41,11 @@ type linkResponse struct {
 	OriginalURL string `json:"original_url"`
 	ShortName   string `json:"short_name"`
 	ShortURL    string `json:"short_url"`
+}
+
+type linksRange struct {
+	start int64
+	end   int64
 }
 
 func setupRouter(queries store.Querier) *gin.Engine {
@@ -68,11 +75,18 @@ func setupRouter(queries store.Querier) *gin.Engine {
 
 func registerLinkRoutes(router *gin.Engine, queries store.Querier, baseURL string) {
 	router.GET("/api/links", func(c *gin.Context) {
-		links, err := queries.ListLinks(c.Request.Context())
+		requestedRange, hasRange, ok := parseLinksRange(c)
+		if !ok {
+			return
+		}
+
+		links, total, responseStart, err := listLinks(c.Request.Context(), queries, requestedRange, hasRange)
 		if err != nil {
 			respondInternalError(c)
 			return
 		}
+
+		setLinksRangeHeaders(c, responseStart, int64(len(links)), total)
 
 		response := make([]linkResponse, len(links))
 		for i, link := range links {
@@ -183,6 +197,96 @@ func registerLinkRoutes(router *gin.Engine, queries store.Querier, baseURL strin
 
 		c.Status(http.StatusNoContent)
 	})
+}
+
+func listLinks(ctx context.Context, queries store.Querier, requestedRange linksRange, hasRange bool) ([]store.Link, int64, int64, error) {
+	if !hasRange {
+		links, err := queries.ListLinks(ctx)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+
+		return links, int64(len(links)), 0, nil
+	}
+
+	total, err := queries.CountLinks(ctx)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	links, err := queries.ListLinksPage(ctx, store.ListLinksPageParams{
+		PageOffset: int32(requestedRange.start),
+		PageLimit:  int32(requestedRange.limit()),
+	})
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	return links, total, requestedRange.start, nil
+}
+
+func parseLinksRange(c *gin.Context) (linksRange, bool, bool) {
+	rawRange, hasRange := c.GetQuery("range")
+	if !hasRange {
+		return linksRange{}, false, true
+	}
+
+	requestedRange, err := parseLinksRangeValue(rawRange)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid range"})
+		return linksRange{}, true, false
+	}
+
+	return requestedRange, true, true
+}
+
+func parseLinksRangeValue(rawRange string) (linksRange, error) {
+	trimmed := strings.TrimSpace(rawRange)
+	if !strings.HasPrefix(trimmed, "[") || !strings.HasSuffix(trimmed, "]") {
+		return linksRange{}, errors.New("range must be wrapped in brackets")
+	}
+
+	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]"), ",")
+	if len(parts) != 2 {
+		return linksRange{}, errors.New("range must include start and end")
+	}
+
+	start, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 32)
+	if err != nil {
+		return linksRange{}, fmt.Errorf("parse range start: %w", err)
+	}
+
+	end, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 32)
+	if err != nil {
+		return linksRange{}, fmt.Errorf("parse range end: %w", err)
+	}
+
+	if start < 0 || end < start {
+		return linksRange{}, errors.New("range boundaries must be non-negative and ordered")
+	}
+
+	if end-start+1 > maxLinksRangeLimit {
+		return linksRange{}, errors.New("range is too large")
+	}
+
+	return linksRange{start: start, end: end}, nil
+}
+
+func (r linksRange) limit() int64 {
+	return r.end - r.start + 1
+}
+
+func setLinksRangeHeaders(c *gin.Context, start, count, total int64) {
+	c.Header("Accept-Ranges", linksRangeUnit)
+	c.Header("Content-Range", linksContentRange(start, count, total))
+}
+
+func linksContentRange(start, count, total int64) string {
+	if count == 0 {
+		return fmt.Sprintf("%s */%d", linksRangeUnit, total)
+	}
+
+	return fmt.Sprintf("%s %d-%d/%d", linksRangeUnit, start, start+count-1, total)
 }
 
 func bindLinkRequest(c *gin.Context, requireShortName bool) (linkRequest, bool) {

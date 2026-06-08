@@ -16,11 +16,21 @@ import (
 )
 
 type fakeStore struct {
-	createLinkFunc func(context.Context, store.CreateLinkParams) (store.Link, error)
-	deleteLinkFunc func(context.Context, int64) (int64, error)
-	getLinkFunc    func(context.Context, int64) (store.Link, error)
-	listLinksFunc  func(context.Context) ([]store.Link, error)
-	updateLinkFunc func(context.Context, store.UpdateLinkParams) (store.Link, error)
+	countLinksFunc    func(context.Context) (int64, error)
+	createLinkFunc    func(context.Context, store.CreateLinkParams) (store.Link, error)
+	deleteLinkFunc    func(context.Context, int64) (int64, error)
+	getLinkFunc       func(context.Context, int64) (store.Link, error)
+	listLinksFunc     func(context.Context) ([]store.Link, error)
+	listLinksPageFunc func(context.Context, store.ListLinksPageParams) ([]store.Link, error)
+	updateLinkFunc    func(context.Context, store.UpdateLinkParams) (store.Link, error)
+}
+
+func (f fakeStore) CountLinks(ctx context.Context) (int64, error) {
+	if f.countLinksFunc == nil {
+		return 0, errors.New("unexpected CountLinks call")
+	}
+
+	return f.countLinksFunc(ctx)
 }
 
 func (f fakeStore) CreateLink(ctx context.Context, arg store.CreateLinkParams) (store.Link, error) {
@@ -53,6 +63,14 @@ func (f fakeStore) ListLinks(ctx context.Context) ([]store.Link, error) {
 	}
 
 	return f.listLinksFunc(ctx)
+}
+
+func (f fakeStore) ListLinksPage(ctx context.Context, arg store.ListLinksPageParams) ([]store.Link, error) {
+	if f.listLinksPageFunc == nil {
+		return nil, errors.New("unexpected ListLinksPage call")
+	}
+
+	return f.listLinksPageFunc(ctx, arg)
 }
 
 func (f fakeStore) UpdateLink(ctx context.Context, arg store.UpdateLinkParams) (store.Link, error) {
@@ -124,6 +142,67 @@ func TestListLinksRouteReturnsLinks(t *testing.T) {
 		if response[i] != expected[i] {
 			t.Fatalf("expected link %d to be %#v, got %#v", i, expected[i], response[i])
 		}
+	}
+}
+
+func TestListLinksRouteReturnsRequestedRange(t *testing.T) {
+	t.Setenv("BASE_URL", "https://dev.short")
+
+	page := make([]store.Link, 5)
+	for i := range page {
+		id := int64(i + 6)
+		page[i] = store.Link{
+			ID:          id,
+			OriginalUrl: "https://example.com/link",
+			ShortName:   "short",
+		}
+	}
+
+	router := setupRouter(fakeStore{
+		countLinksFunc: func(context.Context) (int64, error) {
+			return 12, nil
+		},
+		listLinksPageFunc: func(_ context.Context, arg store.ListLinksPageParams) ([]store.Link, error) {
+			if arg.PageOffset != 5 {
+				t.Fatalf("expected page offset 5, got %d", arg.PageOffset)
+			}
+
+			if arg.PageLimit != 5 {
+				t.Fatalf("expected page limit 5, got %d", arg.PageLimit)
+			}
+
+			return page, nil
+		},
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/links?range=[5,9]", nil)
+
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+
+	if contentRange := recorder.Header().Get("Content-Range"); contentRange != "links 5-9/12" {
+		t.Fatalf("expected Content-Range %q, got %q", "links 5-9/12", contentRange)
+	}
+
+	var response []linkResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+
+	if len(response) != 5 {
+		t.Fatalf("expected 5 links, got %d", len(response))
+	}
+
+	if response[0].ID != 6 {
+		t.Fatalf("expected first returned link id to be 6, got %d", response[0].ID)
+	}
+
+	if response[len(response)-1].ID != 10 {
+		t.Fatalf("expected last returned link id to be 10, got %d", response[len(response)-1].ID)
 	}
 }
 
