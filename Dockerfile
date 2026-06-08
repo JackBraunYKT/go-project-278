@@ -1,5 +1,5 @@
 # Build backend
-FROM golang:1.25-alpine AS backend-builder
+FROM golang:1.26-alpine AS backend-builder
 RUN apk add --no-cache git
 WORKDIR /build/code
 
@@ -7,7 +7,7 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
 go mod download
 
-RUN go install github.com/pressly/goose/v3/cmd/goose@latest
+RUN go install github.com/pressly/goose/v3/cmd/goose@v3.27.1
 
 COPY . .
 
@@ -21,7 +21,7 @@ WORKDIR /app
 
 COPY --from=backend-builder /build/app /app/bin/app
 
-COPY --from=backend-builder build/code/db/migrations /app/db/migrations
+COPY --from=backend-builder /build/code/db/migrations /app/db/migrations
 COPY --from=backend-builder /go/bin/goose /usr/local/bin/goose
 
 COPY bin/run.sh /app/bin/run.sh
