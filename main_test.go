@@ -28,3 +28,13 @@ func TestPingRouteReturnsPong(t *testing.T) {
 		t.Fatalf("expected message %q, got %q", "pong", response["message"])
 	}
 }
+
+func TestSentryClientOptionsUseDSNFromEnvironment(t *testing.T) {
+	t.Setenv("SENTRY_DSN", "https://public@example.com/1")
+
+	options := sentryClientOptionsFromEnv()
+
+	if options.Dsn != "https://public@example.com/1" {
+		t.Fatalf("expected Sentry DSN from environment, got %q", options.Dsn)
+	}
+}

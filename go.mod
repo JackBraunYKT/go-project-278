@@ -2,7 +2,11 @@ module github.com/JackBraunYKT/go-project-278
 
 go 1.25.3
 
-require github.com/gin-gonic/gin v1.12.0
+require (
+	github.com/getsentry/sentry-go v0.46.2
+	github.com/getsentry/sentry-go/gin v0.46.2
+	github.com/gin-gonic/gin v1.12.0
+)
 
 require (
 	github.com/bytedance/gopkg v0.1.4 // indirect
