@@ -426,10 +426,6 @@ func setLinksRangeHeaders(c *gin.Context, start, count, total int64) {
 	setRangeHeaders(c, linksRangeUnit, start, count, total)
 }
 
-func linksContentRange(start, count, total int64) string {
-	return contentRange(linksRangeUnit, start, count, total)
-}
-
 func setRangeHeaders(c *gin.Context, unit string, start, count, total int64) {
 	c.Header("Accept-Ranges", unit)
 	c.Header("Content-Range", contentRange(unit, start, count, total))
