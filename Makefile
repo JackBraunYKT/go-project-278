@@ -27,13 +27,13 @@ generate:
 sqlc: generate
 
 migrate-up:
-	go tool goose -dir ./db/migrations postgres "$$DATABASE_URL" up
+	go tool goose -dir ./db/migrations postgres "$(DATABASE_URL)" up
 
 migrate-down:
-	go tool goose -dir ./db/migrations postgres "$$DATABASE_URL" down
+	go tool goose -dir ./db/migrations postgres "$(DATABASE_URL)" down
 
 migrate-status:
-	go tool goose -dir ./db/migrations postgres "$$DATABASE_URL" status
+	go tool goose -dir ./db/migrations postgres "$(DATABASE_URL)" status
 
 migrate-create:
 	go tool goose -dir ./db/migrations create $(name) sql
