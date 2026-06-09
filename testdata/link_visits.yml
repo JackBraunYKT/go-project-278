@@ -1,0 +1,22 @@
+link_visits:
+  - id: 1
+    short_name: "google"
+    created_at: "2025-10-31T13:01:43Z"
+    ip: "172.18.0.1"
+    user_agent: "curl/8.5.0"
+    referer: "https://example.com"
+    status: 302
+  - id: 2
+    short_name: "google"
+    created_at: "2025-10-31T13:05:00Z"
+    ip: "172.18.0.2"
+    user_agent: "Mozilla/5.0"
+    referer: "https://google.com"
+    status: 301
+  - id: 3
+    short_name: "github"
+    created_at: "2025-10-31T13:10:00Z"
+    ip: "172.18.0.3"
+    user_agent: "PostmanRuntime/7.43.0"
+    referer: "https://app.example.com"
+    status: 302

@@ -1,0 +1,13 @@
+links:
+  - id: 1
+    original_url: https://google.com
+    short_name: google
+    short_url: https://short.io/g
+  - id: 2
+    original_url: https://github.com
+    short_name: github
+    short_url: https://short.io/gh
+  - id: 3
+    original_url: https://twitter.com
+    short_name: twitter
+    short_url: https://short.io/tw

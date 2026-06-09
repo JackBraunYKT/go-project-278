@@ -1,39 +1,50 @@
-.PHONY: test lint build run generate sqlc migrate-up migrate-down migrate-status migrate-create
-
 POSTGRES_CONTAINER = go-project-278-postgres
 TEST_POSTGRES_CONTAINER = go-project-278-postgres-test
 POSTGRES_IMAGE = postgres:16
-DATABASE_URL ?= postgres://postgres:postgres@localhost:5432/go-project-278?sslmode=disable
+DATABASE_URL ?= postgres://postgres:postgres@localhost:5432/link_shortener?sslmode=disable
 
 test:
-	go mod tidy
-	go test -v ./... --race
+	go test --race ./...
 
 lint:
-	go tool golangci-lint run ./...
-
-build:
-	go build -o bin/go-project-278 ./main.go
+	golangci-lint run ./...
 
 run:
-	./bin/go-project-278
+	go run main.go
+
+dev:
+	npm run dev
 
 run-frontend:
 	npx start-hexlet-url-shortener-frontend
 
-generate:
-	go tool sqlc generate
+migration-create:
+	goose -dir db/migrations create $(name) sql
 
-sqlc: generate
+migration-up:
+	goose -dir db/migrations postgres "$(DATABASE_URL)" up
 
-migrate-up:
-	go tool goose -dir ./db/migrations postgres "$(DATABASE_URL)" up
+sqlc-generate:
+	sqlc generate
 
-migrate-down:
-	go tool goose -dir ./db/migrations postgres "$(DATABASE_URL)" down
+db-up:
+	docker run --name $(POSTGRES_CONTAINER) \
+		-e POSTGRES_PASSWORD=postgres \
+		-e POSTGRES_DB=link_shortener \
+		-p 5432:5432 \
+		-d $(POSTGRES_IMAGE)
 
-migrate-status:
-	go tool goose -dir ./db/migrations postgres "$(DATABASE_URL)" status
+db-down:
+	docker stop $(POSTGRES_CONTAINER)
+	docker rm $(POSTGRES_CONTAINER)
 
-migrate-create:
-	go tool goose -dir ./db/migrations create $(name) sql
+test-db-up:
+	docker run --name $(TEST_POSTGRES_CONTAINER) \
+		-e POSTGRES_PASSWORD=postgres \
+		-e POSTGRES_DB=link_shortener_test \
+		-p 5432:5432 \
+		-d $(POSTGRES_IMAGE)
+
+test-db-down:
+	docker stop $(TEST_POSTGRES_CONTAINER)
+	docker rm $(TEST_POSTGRES_CONTAINER)
