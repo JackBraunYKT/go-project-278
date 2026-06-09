@@ -142,13 +142,13 @@ func TestPingRouteReturnsPong(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
 	}
 
-	var response map[string]string
+	var response string
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response body: %v", err)
 	}
 
-	if response["message"] != "pong" {
-		t.Fatalf("expected message %q, got %q", "pong", response["message"])
+	if response != "pong" {
+		t.Fatalf("expected body %q, got %q", "pong", response)
 	}
 }
 
