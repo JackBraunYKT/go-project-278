@@ -1,5 +1,10 @@
 .PHONY: test lint build run generate sqlc migrate-up migrate-down migrate-status migrate-create
 
+POSTGRES_CONTAINER = go-project-278-postgres
+TEST_POSTGRES_CONTAINER = go-project-278-postgres-test
+POSTGRES_IMAGE = postgres:16
+DATABASE_URL ?= postgres://postgres:postgres@localhost:5432/go-project-278?sslmode=disable
+
 test:
 	go mod tidy
 	go test -v ./... --race
@@ -12,6 +17,9 @@ build:
 
 run:
 	./bin/go-project-278
+
+run-frontend:
+	npx start-hexlet-url-shortener-frontend
 
 generate:
 	go tool sqlc generate

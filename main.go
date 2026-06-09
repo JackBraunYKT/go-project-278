@@ -25,6 +25,7 @@ import (
 
 const (
 	defaultBaseURL       = "https://short.io"
+	frontendOrigin       = "http://localhost:5173"
 	generatedNameBytes   = 6
 	linksRangeUnit       = "links"
 	maxLinksRangeLimit   = int64(1<<31 - 1)
@@ -52,6 +53,7 @@ func setupRouter(queries store.Querier) *gin.Engine {
 	baseURL := baseURLFromEnv()
 	router := gin.New()
 	router.Use(
+		corsMiddleware(),
 		gin.Logger(),
 		gin.Recovery(),
 		sentrygin.New(sentrygin.Options{
@@ -71,6 +73,25 @@ func setupRouter(queries store.Querier) *gin.Engine {
 	})
 
 	return router
+}
+
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.GetHeader("Origin") == frontendOrigin {
+			c.Header("Access-Control-Allow-Origin", frontendOrigin)
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, Range")
+			c.Header("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges")
+			c.Header("Vary", "Origin")
+
+			if c.Request.Method == http.MethodOptions {
+				c.AbortWithStatus(http.StatusNoContent)
+				return
+			}
+		}
+
+		c.Next()
+	}
 }
 
 func registerLinkRoutes(router *gin.Engine, queries store.Querier, baseURL string) {

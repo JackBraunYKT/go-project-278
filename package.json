@@ -1,0 +1,11 @@
+{
+  "scripts": {
+    "dev": "concurrently --kill-others-on-fail --names api,frontend \"go run .\" \"npx start-hexlet-url-shortener-frontend\""
+  },
+  "dependencies": {
+    "@hexlet/project-url-shortener-frontend": "^1.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

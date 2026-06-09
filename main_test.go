@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/JackBraunYKT/go-project-278/internal/store"
@@ -100,6 +101,60 @@ func TestPingRouteReturnsPong(t *testing.T) {
 
 	if response["message"] != "pong" {
 		t.Fatalf("expected message %q, got %q", "pong", response["message"])
+	}
+}
+
+func TestAPIRouteAllowsFrontendOrigin(t *testing.T) {
+	router := setupRouter(fakeStore{
+		listLinksFunc: func(context.Context) ([]store.Link, error) {
+			return []store.Link{}, nil
+		},
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/links", nil)
+	request.Header.Set("Origin", "http://localhost:5173")
+
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+
+	if origin := recorder.Header().Get("Access-Control-Allow-Origin"); origin != "http://localhost:5173" {
+		t.Fatalf("expected frontend origin to be allowed, got %q", origin)
+	}
+
+	if exposedHeaders := recorder.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(exposedHeaders, "Content-Range") {
+		t.Fatalf("expected Content-Range to be exposed, got %q", exposedHeaders)
+	}
+}
+
+func TestPreflightAllowsFrontendRequests(t *testing.T) {
+	router := setupRouter(nil)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodOptions, "/api/links", nil)
+	request.Header.Set("Origin", "http://localhost:5173")
+	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	request.Header.Set("Access-Control-Request-Headers", "Content-Type")
+
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("expected status %d, got %d", http.StatusNoContent, recorder.Code)
+	}
+
+	if origin := recorder.Header().Get("Access-Control-Allow-Origin"); origin != "http://localhost:5173" {
+		t.Fatalf("expected frontend origin to be allowed, got %q", origin)
+	}
+
+	if methods := recorder.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(methods, http.MethodPost) {
+		t.Fatalf("expected POST method to be allowed, got %q", methods)
+	}
+
+	if headers := recorder.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(headers, "Content-Type") {
+		t.Fatalf("expected Content-Type header to be allowed, got %q", headers)
 	}
 }
 
