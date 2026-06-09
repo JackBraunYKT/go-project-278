@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +20,8 @@ import (
 	"github.com/getsentry/sentry-go"
 	sentrygin "github.com/getsentry/sentry-go/gin"
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
+	"github.com/go-playground/validator/v10"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/joho/godotenv"
@@ -33,9 +37,14 @@ const (
 	maxShortNameAttempts = 5
 )
 
-type linkRequest struct {
-	OriginalURL string `json:"original_url"`
-	ShortName   string `json:"short_name"`
+type createLinkPayload struct {
+	OriginalURL string `json:"original_url" binding:"required,url"`
+	ShortName   string `json:"short_name" binding:"omitempty,min=3,max=32"`
+}
+
+type updateLinkPayload struct {
+	OriginalURL string `json:"original_url" binding:"required,url"`
+	ShortName   string `json:"short_name" binding:"omitempty,min=3,max=32"`
 }
 
 type linkResponse struct {
@@ -57,6 +66,25 @@ type linkVisitResponse struct {
 type linksRange struct {
 	start int64
 	end   int64
+}
+
+func init() {
+	configureValidator()
+}
+
+func configureValidator() {
+	if validate, ok := binding.Validator.Engine().(*validator.Validate); ok {
+		validate.RegisterTagNameFunc(jsonTagName)
+	}
+}
+
+func jsonTagName(field reflect.StructField) string {
+	name := strings.SplitN(field.Tag.Get("json"), ",", 2)[0]
+	if name == "-" {
+		return ""
+	}
+
+	return name
 }
 
 func setupRouter(queries store.Querier) *gin.Engine {
@@ -151,7 +179,7 @@ func registerLinkRoutes(router *gin.Engine, queries store.Querier, baseURL strin
 	})
 
 	router.POST("/api/links", func(c *gin.Context) {
-		request, ok := bindLinkRequest(c, false)
+		request, ok := bindCreateLinkPayload(c)
 		if !ok {
 			return
 		}
@@ -179,7 +207,7 @@ func registerLinkRoutes(router *gin.Engine, queries store.Querier, baseURL strin
 
 			if isUniqueViolation(err) {
 				if hasProvidedShortName {
-					c.JSON(http.StatusConflict, gin.H{"error": "short_name already exists"})
+					respondShortNameInUse(c)
 					return
 				}
 
@@ -214,15 +242,26 @@ func registerLinkRoutes(router *gin.Engine, queries store.Querier, baseURL strin
 			return
 		}
 
-		request, ok := bindLinkRequest(c, true)
+		request, ok := bindUpdateLinkPayload(c)
 		if !ok {
 			return
+		}
+
+		shortName := request.ShortName
+		if shortName == "" {
+			existing, err := queries.GetLink(c.Request.Context(), id)
+			if err != nil {
+				respondStoreError(c, err)
+				return
+			}
+
+			shortName = existing.ShortName
 		}
 
 		link, err := queries.UpdateLink(c.Request.Context(), store.UpdateLinkParams{
 			ID:          id,
 			OriginalUrl: request.OriginalURL,
-			ShortName:   request.ShortName,
+			ShortName:   shortName,
 		})
 		if err != nil {
 			respondStoreError(c, err)
@@ -404,27 +443,44 @@ func contentRange(unit string, start, count, total int64) string {
 	return fmt.Sprintf("%s %d-%d/%d", unit, start, start+count-1, total)
 }
 
-func bindLinkRequest(c *gin.Context, requireShortName bool) (linkRequest, bool) {
-	var request linkRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return linkRequest{}, false
+func bindCreateLinkPayload(c *gin.Context) (createLinkPayload, bool) {
+	var request createLinkPayload
+	if err := json.NewDecoder(c.Request.Body).Decode(&request); err != nil {
+		respondBindingError(c, err)
+		return createLinkPayload{}, false
 	}
 
 	request.OriginalURL = strings.TrimSpace(request.OriginalURL)
 	request.ShortName = strings.TrimSpace(request.ShortName)
 
-	if request.OriginalURL == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "original_url is required"})
-		return linkRequest{}, false
-	}
-
-	if requireShortName && request.ShortName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "short_name is required"})
-		return linkRequest{}, false
+	if err := validatePayload(request); err != nil {
+		respondBindingError(c, err)
+		return createLinkPayload{}, false
 	}
 
 	return request, true
+}
+
+func bindUpdateLinkPayload(c *gin.Context) (updateLinkPayload, bool) {
+	var request updateLinkPayload
+	if err := json.NewDecoder(c.Request.Body).Decode(&request); err != nil {
+		respondBindingError(c, err)
+		return updateLinkPayload{}, false
+	}
+
+	request.OriginalURL = strings.TrimSpace(request.OriginalURL)
+	request.ShortName = strings.TrimSpace(request.ShortName)
+
+	if err := validatePayload(request); err != nil {
+		respondBindingError(c, err)
+		return updateLinkPayload{}, false
+	}
+
+	return request, true
+}
+
+func validatePayload(payload any) error {
+	return binding.Validator.ValidateStruct(payload)
 }
 
 func parseLinkID(c *gin.Context) (int64, bool) {
@@ -480,10 +536,33 @@ func respondStoreError(c *gin.Context, err error) {
 	case errors.Is(err, pgx.ErrNoRows):
 		c.JSON(http.StatusNotFound, gin.H{"error": "link not found"})
 	case isUniqueViolation(err):
-		c.JSON(http.StatusConflict, gin.H{"error": "short_name already exists"})
+		respondShortNameInUse(c)
 	default:
 		respondInternalError(c)
 	}
+}
+
+func respondBindingError(c *gin.Context, err error) {
+	var validationErrors validator.ValidationErrors
+	if errors.As(err, &validationErrors) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": validationErrorsByField(validationErrors)})
+		return
+	}
+
+	c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+}
+
+func validationErrorsByField(validationErrors validator.ValidationErrors) map[string]string {
+	errorsByField := make(map[string]string, len(validationErrors))
+	for _, fieldError := range validationErrors {
+		errorsByField[fieldError.Field()] = fieldError.Error()
+	}
+
+	return errorsByField
+}
+
+func respondShortNameInUse(c *gin.Context) {
+	c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": gin.H{"short_name": "short name already in use"}})
 }
 
 func respondInternalError(c *gin.Context) {

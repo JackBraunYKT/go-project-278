@@ -523,6 +523,34 @@ func TestCreateLinkRouteCreatesLinkWithProvidedShortName(t *testing.T) {
 	}
 }
 
+func TestCreateLinkRouteTrimsPayloadBeforeValidation(t *testing.T) {
+	var received store.CreateLinkParams
+	router := setupRouter(fakeStore{
+		createLinkFunc: func(_ context.Context, arg store.CreateLinkParams) (store.Link, error) {
+			received = arg
+			return store.Link{ID: 1, OriginalUrl: arg.OriginalUrl, ShortName: arg.ShortName}, nil
+		},
+	})
+
+	body := bytes.NewBufferString(`{"original_url":" https://example.com/long-url ","short_name":" exmpl "}`)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/links", body)
+
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d", http.StatusCreated, recorder.Code)
+	}
+
+	if received.OriginalUrl != "https://example.com/long-url" {
+		t.Fatalf("expected original url to be trimmed, got %q", received.OriginalUrl)
+	}
+
+	if received.ShortName != "exmpl" {
+		t.Fatalf("expected short name to be trimmed, got %q", received.ShortName)
+	}
+}
+
 func TestCreateLinkRouteGeneratesShortNameWhenMissing(t *testing.T) {
 	router := setupRouter(fakeStore{
 		createLinkFunc: func(_ context.Context, arg store.CreateLinkParams) (store.Link, error) {
@@ -558,6 +586,47 @@ func TestCreateLinkRouteGeneratesShortNameWhenMissing(t *testing.T) {
 	}
 }
 
+func TestCreateLinkRouteReturnsBadRequestForInvalidJSON(t *testing.T) {
+	router := setupRouter(fakeStore{})
+
+	body := bytes.NewBufferString(`{"original_url":`)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/links", body)
+
+	router.ServeHTTP(recorder, request)
+
+	assertJSONError(t, recorder, http.StatusBadRequest, "invalid request")
+}
+
+func TestCreateLinkRouteReturnsValidationErrors(t *testing.T) {
+	router := setupRouter(fakeStore{})
+
+	body := bytes.NewBufferString(`{"original_url":"not a url","short_name":"ab"}`)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/links", body)
+
+	router.ServeHTTP(recorder, request)
+
+	assertValidationErrors(t, recorder, http.StatusUnprocessableEntity, map[string]string{
+		"original_url": "Key: 'createLinkPayload.original_url' Error:Field validation for 'original_url' failed on the 'url' tag",
+		"short_name":   "Key: 'createLinkPayload.short_name' Error:Field validation for 'short_name' failed on the 'min' tag",
+	})
+}
+
+func TestCreateLinkRouteReturnsValidationErrorWhenOriginalURLMissing(t *testing.T) {
+	router := setupRouter(fakeStore{})
+
+	body := bytes.NewBufferString(`{"short_name":"exmpl"}`)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/links", body)
+
+	router.ServeHTTP(recorder, request)
+
+	assertValidationErrors(t, recorder, http.StatusUnprocessableEntity, map[string]string{
+		"original_url": "Key: 'createLinkPayload.original_url' Error:Field validation for 'original_url' failed on the 'required' tag",
+	})
+}
+
 func TestCreateLinkRouteReturnsConflictWhenShortNameAlreadyExists(t *testing.T) {
 	router := setupRouter(fakeStore{
 		createLinkFunc: func(context.Context, store.CreateLinkParams) (store.Link, error) {
@@ -571,7 +640,9 @@ func TestCreateLinkRouteReturnsConflictWhenShortNameAlreadyExists(t *testing.T) 
 
 	router.ServeHTTP(recorder, request)
 
-	assertJSONError(t, recorder, http.StatusConflict, "short_name already exists")
+	assertValidationErrors(t, recorder, http.StatusUnprocessableEntity, map[string]string{
+		"short_name": "short name already in use",
+	})
 }
 
 func TestGetLinkRouteReturnsLink(t *testing.T) {
@@ -650,6 +721,82 @@ func TestUpdateLinkRouteUpdatesLink(t *testing.T) {
 	if response.ShortURL != "https://short.io/r/updated" {
 		t.Fatalf("expected short url to use updated short name, got %q", response.ShortURL)
 	}
+}
+
+func TestUpdateLinkRoutePreservesShortNameWhenMissing(t *testing.T) {
+	var received store.UpdateLinkParams
+	router := setupRouter(fakeStore{
+		getLinkFunc: func(_ context.Context, id int64) (store.Link, error) {
+			if id != 9 {
+				t.Fatalf("expected id 9, got %d", id)
+			}
+
+			return store.Link{ID: id, OriginalUrl: "https://example.com/old", ShortName: "existing"}, nil
+		},
+		updateLinkFunc: func(_ context.Context, arg store.UpdateLinkParams) (store.Link, error) {
+			received = arg
+			return store.Link{ID: arg.ID, OriginalUrl: arg.OriginalUrl, ShortName: arg.ShortName}, nil
+		},
+	})
+
+	body := bytes.NewBufferString(`{"original_url":"https://example.com/updated"}`)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/links/9", body)
+
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+
+	if received.ShortName != "existing" {
+		t.Fatalf("expected existing short name to be preserved, got %q", received.ShortName)
+	}
+}
+
+func TestUpdateLinkRouteReturnsBadRequestForInvalidJSON(t *testing.T) {
+	router := setupRouter(fakeStore{})
+
+	body := bytes.NewBufferString(`{"original_url":`)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/links/9", body)
+
+	router.ServeHTTP(recorder, request)
+
+	assertJSONError(t, recorder, http.StatusBadRequest, "invalid request")
+}
+
+func TestUpdateLinkRouteReturnsValidationErrors(t *testing.T) {
+	router := setupRouter(fakeStore{})
+
+	body := bytes.NewBufferString(`{"original_url":"not a url","short_name":"ab"}`)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/links/9", body)
+
+	router.ServeHTTP(recorder, request)
+
+	assertValidationErrors(t, recorder, http.StatusUnprocessableEntity, map[string]string{
+		"original_url": "Key: 'updateLinkPayload.original_url' Error:Field validation for 'original_url' failed on the 'url' tag",
+		"short_name":   "Key: 'updateLinkPayload.short_name' Error:Field validation for 'short_name' failed on the 'min' tag",
+	})
+}
+
+func TestUpdateLinkRouteReturnsValidationErrorWhenShortNameAlreadyExists(t *testing.T) {
+	router := setupRouter(fakeStore{
+		updateLinkFunc: func(context.Context, store.UpdateLinkParams) (store.Link, error) {
+			return store.Link{}, &pgconn.PgError{Code: "23505"}
+		},
+	})
+
+	body := bytes.NewBufferString(`{"original_url":"https://example.com/updated","short_name":"updated"}`)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/links/9", body)
+
+	router.ServeHTTP(recorder, request)
+
+	assertValidationErrors(t, recorder, http.StatusUnprocessableEntity, map[string]string{
+		"short_name": "short name already in use",
+	})
 }
 
 func TestDeleteLinkRouteDeletesLink(t *testing.T) {
@@ -778,5 +925,30 @@ func assertJSONError(t *testing.T, recorder *httptest.ResponseRecorder, status i
 
 	if response["error"] != message {
 		t.Fatalf("expected error %q, got %q", message, response["error"])
+	}
+}
+
+func assertValidationErrors(t *testing.T, recorder *httptest.ResponseRecorder, status int, expected map[string]string) {
+	t.Helper()
+
+	if recorder.Code != status {
+		t.Fatalf("expected status %d, got %d", status, recorder.Code)
+	}
+
+	var response struct {
+		Errors map[string]string `json:"errors"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+
+	if len(response.Errors) != len(expected) {
+		t.Fatalf("expected validation errors %#v, got %#v", expected, response.Errors)
+	}
+
+	for field, message := range expected {
+		if response.Errors[field] != message {
+			t.Fatalf("expected validation error %s=%q, got %q", field, message, response.Errors[field])
+		}
 	}
 }
