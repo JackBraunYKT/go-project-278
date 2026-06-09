@@ -27,6 +27,7 @@ const (
 	defaultBaseURL       = "https://short.io"
 	frontendOrigin       = "http://localhost:5173"
 	generatedNameBytes   = 6
+	linkVisitsRangeUnit  = "link_visits"
 	linksRangeUnit       = "links"
 	maxLinksRangeLimit   = int64(1<<31 - 1)
 	maxShortNameAttempts = 5
@@ -44,6 +45,15 @@ type linkResponse struct {
 	ShortURL    string `json:"short_url"`
 }
 
+type linkVisitResponse struct {
+	ID        int64     `json:"id"`
+	LinkID    int64     `json:"link_id"`
+	CreatedAt time.Time `json:"created_at"`
+	IP        string    `json:"ip"`
+	UserAgent string    `json:"user_agent"`
+	Status    int32     `json:"status"`
+}
+
 type linksRange struct {
 	start int64
 	end   int64
@@ -52,6 +62,7 @@ type linksRange struct {
 func setupRouter(queries store.Querier) *gin.Engine {
 	baseURL := baseURLFromEnv()
 	router := gin.New()
+	router.TrustedPlatform = gin.PlatformCloudflare
 	router.Use(
 		corsMiddleware(),
 		gin.Logger(),
@@ -112,6 +123,28 @@ func registerLinkRoutes(router *gin.Engine, queries store.Querier, baseURL strin
 		response := make([]linkResponse, len(links))
 		for i, link := range links {
 			response[i] = linkToResponse(link, baseURL)
+		}
+
+		c.JSON(http.StatusOK, response)
+	})
+
+	router.GET("/api/link_visits", func(c *gin.Context) {
+		requestedRange, hasRange, ok := parseLinksRange(c)
+		if !ok {
+			return
+		}
+
+		visits, total, responseStart, err := listLinkVisits(c.Request.Context(), queries, requestedRange, hasRange)
+		if err != nil {
+			respondInternalError(c)
+			return
+		}
+
+		setRangeHeaders(c, linkVisitsRangeUnit, responseStart, int64(len(visits)), total)
+
+		response := make([]linkVisitResponse, len(visits))
+		for i, visit := range visits {
+			response[i] = linkVisitToResponse(visit)
 		}
 
 		c.JSON(http.StatusOK, response)
@@ -218,6 +251,28 @@ func registerLinkRoutes(router *gin.Engine, queries store.Querier, baseURL strin
 
 		c.Status(http.StatusNoContent)
 	})
+
+	router.GET("/r/:code", func(c *gin.Context) {
+		link, err := queries.GetLinkByShortName(c.Request.Context(), c.Param("code"))
+		if err != nil {
+			respondStoreError(c, err)
+			return
+		}
+
+		redirectStatus := http.StatusFound
+		if _, err := queries.CreateLinkVisit(c.Request.Context(), store.CreateLinkVisitParams{
+			LinkID:    link.ID,
+			Ip:        c.ClientIP(),
+			UserAgent: c.Request.UserAgent(),
+			Referer:   c.Request.Referer(),
+			Status:    int32(redirectStatus),
+		}); err != nil {
+			respondInternalError(c)
+			return
+		}
+
+		c.Redirect(redirectStatus, link.OriginalUrl)
+	})
 }
 
 func listLinks(ctx context.Context, queries store.Querier, requestedRange linksRange, hasRange bool) ([]store.Link, int64, int64, error) {
@@ -246,8 +301,39 @@ func listLinks(ctx context.Context, queries store.Querier, requestedRange linksR
 	return links, total, requestedRange.start, nil
 }
 
+func listLinkVisits(ctx context.Context, queries store.Querier, requestedRange linksRange, hasRange bool) ([]store.LinkVisit, int64, int64, error) {
+	if !hasRange {
+		visits, err := queries.ListLinkVisits(ctx)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+
+		return visits, int64(len(visits)), 0, nil
+	}
+
+	total, err := queries.CountLinkVisits(ctx)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	visits, err := queries.ListLinkVisitsPage(ctx, store.ListLinkVisitsPageParams{
+		PageOffset: int32(requestedRange.start),
+		PageLimit:  int32(requestedRange.limit()),
+	})
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	return visits, total, requestedRange.start, nil
+}
+
 func parseLinksRange(c *gin.Context) (linksRange, bool, bool) {
 	rawRange, hasRange := c.GetQuery("range")
+	if !hasRange {
+		rawRange = c.GetHeader("Range")
+		hasRange = rawRange != ""
+	}
+
 	if !hasRange {
 		return linksRange{}, false, true
 	}
@@ -298,16 +384,24 @@ func (r linksRange) limit() int64 {
 }
 
 func setLinksRangeHeaders(c *gin.Context, start, count, total int64) {
-	c.Header("Accept-Ranges", linksRangeUnit)
-	c.Header("Content-Range", linksContentRange(start, count, total))
+	setRangeHeaders(c, linksRangeUnit, start, count, total)
 }
 
 func linksContentRange(start, count, total int64) string {
+	return contentRange(linksRangeUnit, start, count, total)
+}
+
+func setRangeHeaders(c *gin.Context, unit string, start, count, total int64) {
+	c.Header("Accept-Ranges", unit)
+	c.Header("Content-Range", contentRange(unit, start, count, total))
+}
+
+func contentRange(unit string, start, count, total int64) string {
 	if count == 0 {
-		return fmt.Sprintf("%s */%d", linksRangeUnit, total)
+		return fmt.Sprintf("%s */%d", unit, total)
 	}
 
-	return fmt.Sprintf("%s %d-%d/%d", linksRangeUnit, start, start+count-1, total)
+	return fmt.Sprintf("%s %d-%d/%d", unit, start, start+count-1, total)
 }
 
 func bindLinkRequest(c *gin.Context, requireShortName bool) (linkRequest, bool) {
@@ -350,6 +444,22 @@ func linkToResponse(link store.Link, baseURL string) linkResponse {
 		ShortName:   link.ShortName,
 		ShortURL:    shortURL(baseURL, link.ShortName),
 	}
+}
+
+func linkVisitToResponse(visit store.LinkVisit) linkVisitResponse {
+	response := linkVisitResponse{
+		ID:        visit.ID,
+		LinkID:    visit.LinkID,
+		IP:        visit.Ip,
+		UserAgent: visit.UserAgent,
+		Status:    visit.Status,
+	}
+
+	if visit.CreatedAt.Valid {
+		response.CreatedAt = visit.CreatedAt.Time
+	}
+
+	return response
 }
 
 func shortURL(baseURL, shortName string) string {

@@ -10,20 +10,36 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JackBraunYKT/go-project-278/internal/store"
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type fakeStore struct {
-	countLinksFunc    func(context.Context) (int64, error)
-	createLinkFunc    func(context.Context, store.CreateLinkParams) (store.Link, error)
-	deleteLinkFunc    func(context.Context, int64) (int64, error)
-	getLinkFunc       func(context.Context, int64) (store.Link, error)
-	listLinksFunc     func(context.Context) ([]store.Link, error)
-	listLinksPageFunc func(context.Context, store.ListLinksPageParams) ([]store.Link, error)
-	updateLinkFunc    func(context.Context, store.UpdateLinkParams) (store.Link, error)
+	countLinkVisitsFunc    func(context.Context) (int64, error)
+	countLinksFunc         func(context.Context) (int64, error)
+	createLinkFunc         func(context.Context, store.CreateLinkParams) (store.Link, error)
+	createLinkVisitFunc    func(context.Context, store.CreateLinkVisitParams) (store.LinkVisit, error)
+	deleteLinkFunc         func(context.Context, int64) (int64, error)
+	getLinkFunc            func(context.Context, int64) (store.Link, error)
+	getLinkByShortNameFunc func(context.Context, string) (store.Link, error)
+	listLinkVisitsFunc     func(context.Context) ([]store.LinkVisit, error)
+	listLinkVisitsPageFunc func(context.Context, store.ListLinkVisitsPageParams) ([]store.LinkVisit, error)
+	listLinksFunc          func(context.Context) ([]store.Link, error)
+	listLinksPageFunc      func(context.Context, store.ListLinksPageParams) ([]store.Link, error)
+	updateLinkFunc         func(context.Context, store.UpdateLinkParams) (store.Link, error)
+}
+
+func (f fakeStore) CountLinkVisits(ctx context.Context) (int64, error) {
+	if f.countLinkVisitsFunc == nil {
+		return 0, errors.New("unexpected CountLinkVisits call")
+	}
+
+	return f.countLinkVisitsFunc(ctx)
 }
 
 func (f fakeStore) CountLinks(ctx context.Context) (int64, error) {
@@ -42,6 +58,14 @@ func (f fakeStore) CreateLink(ctx context.Context, arg store.CreateLinkParams) (
 	return f.createLinkFunc(ctx, arg)
 }
 
+func (f fakeStore) CreateLinkVisit(ctx context.Context, arg store.CreateLinkVisitParams) (store.LinkVisit, error) {
+	if f.createLinkVisitFunc == nil {
+		return store.LinkVisit{}, errors.New("unexpected CreateLinkVisit call")
+	}
+
+	return f.createLinkVisitFunc(ctx, arg)
+}
+
 func (f fakeStore) DeleteLink(ctx context.Context, id int64) (int64, error) {
 	if f.deleteLinkFunc == nil {
 		return 0, errors.New("unexpected DeleteLink call")
@@ -56,6 +80,30 @@ func (f fakeStore) GetLink(ctx context.Context, id int64) (store.Link, error) {
 	}
 
 	return f.getLinkFunc(ctx, id)
+}
+
+func (f fakeStore) GetLinkByShortName(ctx context.Context, shortName string) (store.Link, error) {
+	if f.getLinkByShortNameFunc == nil {
+		return store.Link{}, errors.New("unexpected GetLinkByShortName call")
+	}
+
+	return f.getLinkByShortNameFunc(ctx, shortName)
+}
+
+func (f fakeStore) ListLinkVisits(ctx context.Context) ([]store.LinkVisit, error) {
+	if f.listLinkVisitsFunc == nil {
+		return nil, errors.New("unexpected ListLinkVisits call")
+	}
+
+	return f.listLinkVisitsFunc(ctx)
+}
+
+func (f fakeStore) ListLinkVisitsPage(ctx context.Context, arg store.ListLinkVisitsPageParams) ([]store.LinkVisit, error) {
+	if f.listLinkVisitsPageFunc == nil {
+		return nil, errors.New("unexpected ListLinkVisitsPage call")
+	}
+
+	return f.listLinkVisitsPageFunc(ctx, arg)
 }
 
 func (f fakeStore) ListLinks(ctx context.Context) ([]store.Link, error) {
@@ -101,6 +149,14 @@ func TestPingRouteReturnsPong(t *testing.T) {
 
 	if response["message"] != "pong" {
 		t.Fatalf("expected message %q, got %q", "pong", response["message"])
+	}
+}
+
+func TestRouterTrustsCloudflarePlatform(t *testing.T) {
+	router := setupRouter(nil)
+
+	if router.TrustedPlatform != gin.PlatformCloudflare {
+		t.Fatalf("expected trusted platform %q, got %q", gin.PlatformCloudflare, router.TrustedPlatform)
 	}
 }
 
@@ -200,6 +256,74 @@ func TestListLinksRouteReturnsLinks(t *testing.T) {
 	}
 }
 
+func TestRedirectRouteRedirectsToOriginalURLAndRecordsVisit(t *testing.T) {
+	var receivedVisit store.CreateLinkVisitParams
+	router := setupRouter(fakeStore{
+		getLinkByShortNameFunc: func(_ context.Context, shortName string) (store.Link, error) {
+			if shortName != "exmpl" {
+				t.Fatalf("expected short name %q, got %q", "exmpl", shortName)
+			}
+
+			return store.Link{ID: 7, OriginalUrl: "https://example.com/long-url", ShortName: shortName}, nil
+		},
+		createLinkVisitFunc: func(_ context.Context, arg store.CreateLinkVisitParams) (store.LinkVisit, error) {
+			receivedVisit = arg
+			return store.LinkVisit{ID: 5, LinkID: arg.LinkID, Ip: arg.Ip, UserAgent: arg.UserAgent, Referer: arg.Referer, Status: arg.Status}, nil
+		},
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/r/exmpl", nil)
+	request.Header.Set("CF-Connecting-IP", "203.0.113.10")
+	request.Header.Set("User-Agent", "curl/8.5.0")
+	request.Header.Set("Referer", "https://ref.example/path")
+
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("expected status %d, got %d", http.StatusFound, recorder.Code)
+	}
+
+	if location := recorder.Header().Get("Location"); location != "https://example.com/long-url" {
+		t.Fatalf("expected redirect location %q, got %q", "https://example.com/long-url", location)
+	}
+
+	if receivedVisit.LinkID != 7 {
+		t.Fatalf("expected link id 7, got %d", receivedVisit.LinkID)
+	}
+
+	if receivedVisit.Ip != "203.0.113.10" {
+		t.Fatalf("expected Cloudflare client IP, got %q", receivedVisit.Ip)
+	}
+
+	if receivedVisit.UserAgent != "curl/8.5.0" {
+		t.Fatalf("expected user agent to be recorded, got %q", receivedVisit.UserAgent)
+	}
+
+	if receivedVisit.Referer != "https://ref.example/path" {
+		t.Fatalf("expected referer to be recorded, got %q", receivedVisit.Referer)
+	}
+
+	if receivedVisit.Status != http.StatusFound {
+		t.Fatalf("expected status %d to be recorded, got %d", http.StatusFound, receivedVisit.Status)
+	}
+}
+
+func TestRedirectRouteReturnsNotFoundWhenShortNameDoesNotExist(t *testing.T) {
+	router := setupRouter(fakeStore{
+		getLinkByShortNameFunc: func(context.Context, string) (store.Link, error) {
+			return store.Link{}, pgx.ErrNoRows
+		},
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/r/missing", nil)
+
+	router.ServeHTTP(recorder, request)
+
+	assertJSONError(t, recorder, http.StatusNotFound, "link not found")
+}
+
 func TestListLinksRouteReturnsRequestedRange(t *testing.T) {
 	t.Setenv("BASE_URL", "https://dev.short")
 
@@ -258,6 +382,100 @@ func TestListLinksRouteReturnsRequestedRange(t *testing.T) {
 
 	if response[len(response)-1].ID != 10 {
 		t.Fatalf("expected last returned link id to be 10, got %d", response[len(response)-1].ID)
+	}
+}
+
+func TestListLinkVisitsRouteReturnsVisits(t *testing.T) {
+	createdAt := time.Date(2025, 10, 31, 13, 1, 43, 0, time.UTC)
+	router := setupRouter(fakeStore{
+		listLinkVisitsFunc: func(context.Context) ([]store.LinkVisit, error) {
+			return []store.LinkVisit{
+				{
+					ID:        5,
+					LinkID:    1,
+					CreatedAt: pgtype.Timestamptz{Time: createdAt, Valid: true},
+					Ip:        "172.18.0.1",
+					UserAgent: "curl/8.5.0",
+					Referer:   "https://ref.example/path",
+					Status:    http.StatusFound,
+				},
+			}, nil
+		},
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/link_visits", nil)
+
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+
+	var response []linkVisitResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+
+	expected := []linkVisitResponse{
+		{
+			ID:        5,
+			LinkID:    1,
+			CreatedAt: createdAt,
+			IP:        "172.18.0.1",
+			UserAgent: "curl/8.5.0",
+			Status:    http.StatusFound,
+		},
+	}
+
+	if len(response) != len(expected) {
+		t.Fatalf("expected %d visits, got %d", len(expected), len(response))
+	}
+
+	if response[0] != expected[0] {
+		t.Fatalf("expected visit %#v, got %#v", expected[0], response[0])
+	}
+}
+
+func TestListLinkVisitsRouteReturnsRequestedRange(t *testing.T) {
+	page := []store.LinkVisit{
+		{ID: 11, LinkID: 1, Ip: "172.18.0.1", UserAgent: "curl/8.5.0", Status: http.StatusFound},
+		{ID: 12, LinkID: 1, Ip: "172.18.0.2", UserAgent: "curl/8.5.0", Status: http.StatusFound},
+	}
+
+	router := setupRouter(fakeStore{
+		countLinkVisitsFunc: func(context.Context) (int64, error) {
+			return 357, nil
+		},
+		listLinkVisitsPageFunc: func(_ context.Context, arg store.ListLinkVisitsPageParams) ([]store.LinkVisit, error) {
+			if arg.PageOffset != 10 {
+				t.Fatalf("expected page offset 10, got %d", arg.PageOffset)
+			}
+
+			if arg.PageLimit != 11 {
+				t.Fatalf("expected page limit 11, got %d", arg.PageLimit)
+			}
+
+			return page, nil
+		},
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/link_visits", nil)
+	request.Header.Set("Range", "[10, 20]")
+
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+
+	if acceptRanges := recorder.Header().Get("Accept-Ranges"); acceptRanges != "link_visits" {
+		t.Fatalf("expected Accept-Ranges %q, got %q", "link_visits", acceptRanges)
+	}
+
+	if contentRange := recorder.Header().Get("Content-Range"); contentRange != "link_visits 10-11/357" {
+		t.Fatalf("expected Content-Range %q, got %q", "link_visits 10-11/357", contentRange)
 	}
 }
 

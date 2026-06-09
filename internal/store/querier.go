@@ -9,10 +9,15 @@ import (
 )
 
 type Querier interface {
+	CountLinkVisits(ctx context.Context) (int64, error)
 	CountLinks(ctx context.Context) (int64, error)
 	CreateLink(ctx context.Context, arg CreateLinkParams) (Link, error)
+	CreateLinkVisit(ctx context.Context, arg CreateLinkVisitParams) (LinkVisit, error)
 	DeleteLink(ctx context.Context, id int64) (int64, error)
 	GetLink(ctx context.Context, id int64) (Link, error)
+	GetLinkByShortName(ctx context.Context, shortName string) (Link, error)
+	ListLinkVisits(ctx context.Context) ([]LinkVisit, error)
+	ListLinkVisitsPage(ctx context.Context, arg ListLinkVisitsPageParams) ([]LinkVisit, error)
 	ListLinks(ctx context.Context) ([]Link, error)
 	ListLinksPage(ctx context.Context, arg ListLinksPageParams) ([]Link, error)
 	UpdateLink(ctx context.Context, arg UpdateLinkParams) (Link, error)
