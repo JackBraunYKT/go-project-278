@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -46,11 +47,30 @@ type LinkVisitFixtures struct {
 }
 
 var testPool *pgxpool.Pool
+var setupTestPoolOnce sync.Once
+var setupTestPoolErr error
 
-// TestMain подготавливает тестовую базу данных и запускает тесты пакета.
+// TestMain настраивает режим Gin и запускает тесты пакета.
 func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
 
+	code := m.Run()
+	if testPool != nil {
+		testPool.Close()
+	}
+	os.Exit(code)
+}
+
+// setupTestPool подготавливает тестовую базу данных при первом обращении к setupTx.
+func setupTestPool() error {
+	setupTestPoolOnce.Do(func() {
+		setupTestPoolErr = openTestPool()
+	})
+
+	return setupTestPoolErr
+}
+
+func openTestPool() (err error) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "postgres://postgres:postgres@localhost:5432/link_shortener_test?sslmode=disable"
@@ -58,24 +78,32 @@ func TestMain(m *testing.M) {
 
 	sqlDB, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
+	defer func() {
+		closeErr := sqlDB.Close()
+		if closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	if err := goose.Up(sqlDB, migrationsPath()); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	testPool, err = pgxpool.New(context.Background(), dbURL)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
-	code := m.Run()
-	testPool.Close()
-	os.Exit(code)
+	return nil
 }
 
 func setupTx(t *testing.T) (pgx.Tx, *repository.Queries) {
+	t.Helper()
+
+	require.NoError(t, setupTestPool())
+
 	tx, err := testPool.Begin(context.Background())
 	require.NoError(t, err)
 
